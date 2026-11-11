@@ -330,6 +330,104 @@ body { display: flex; flex-direction: column; }
   .side-col { width: 150px; }
 }
 
+/* ===================== 动效 ===================== */
+
+/* 发牌/抓牌飞入 */
+.card.deal-in { animation: dealIn 0.35s ease-out backwards; }
+@keyframes dealIn {
+  from { transform: translateY(-46px) scale(0.8); opacity: 0; }
+  to { transform: translateY(0) scale(1); opacity: 1; }
+}
+
+/* 出牌弹出 */
+.card.play-in { animation: playIn 0.26s cubic-bezier(0.2, 0.8, 0.3, 1.2) backwards; }
+@keyframes playIn {
+  from { transform: translateY(-14px) scale(0.6); opacity: 0; }
+  to { transform: translateY(0) scale(1); opacity: 1; }
+}
+
+/* 被压/淡出 */
+.card.sink { animation: sinkOut 0.22s ease-in forwards; }
+@keyframes sinkOut {
+  to { transform: scale(0.7); opacity: 0; }
+}
+
+/* 整桌震动 */
+.game-table.shake { animation: shake 0.4s; }
+@keyframes shake {
+  0%, 100% { transform: translate(0, 0); }
+  20% { transform: translate(-6px, 3px); }
+  40% { transform: translate(6px, -3px); }
+  60% { transform: translate(-5px, -2px); }
+  80% { transform: translate(5px, 2px); }
+}
+
+/* 白光一闪 */
+.flash-overlay {
+  position: fixed; inset: 0; background: #fff; opacity: 0;
+  pointer-events: none; z-index: 60;
+}
+.flash-overlay.show { animation: flashAnim 0.5s ease-out; }
+@keyframes flashAnim {
+  0% { opacity: 0.9; }
+  100% { opacity: 0; }
+}
+
+/* 中央大字播报 */
+.banner {
+  position: fixed; left: 50%; top: 38%;
+  transform: translate(-50%, -50%) scale(0.3);
+  font-size: 50px; font-weight: 900; color: #ffd54a;
+  text-shadow: 0 0 14px rgba(0, 0, 0, 0.65), 0 3px 0 #a0650a;
+  opacity: 0; pointer-events: none; z-index: 70; white-space: nowrap;
+}
+.banner.show { animation: bannerPop 1.3s ease-out forwards; }
+@keyframes bannerPop {
+  0% { transform: translate(-50%, -50%) scale(0.3); opacity: 0; }
+  20% { transform: translate(-50%, -50%) scale(1.25); opacity: 1; }
+  35% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+  100% { transform: translate(-50%, -50%) scale(1); opacity: 0; }
+}
+
+/* 撒花 */
+.confetti-layer { position: fixed; inset: 0; pointer-events: none; z-index: 55; overflow: hidden; }
+.confetti {
+  position: absolute; top: -20px;
+  width: 10px; height: 16px; border-radius: 2px; opacity: 0.9;
+  animation-name: confettiFall;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+@keyframes confettiFall {
+  to { transform: translateY(110vh) rotate(720deg); opacity: 0.7; }
+}
+
+/* AI 头像 */
+.avatar {
+  width: 34px; height: 34px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 20px; background: #3a5a8a;
+  flex: 0 0 auto;
+}
+
+/* 播报气泡（要不起/炸弹） */
+.opp-row { position: relative; }
+.bubble {
+  position: absolute; left: 50%; top: -16px;
+  transform: translateX(-50%);
+  background: #fff; color: #222;
+  font-size: 12px; font-weight: 700;
+  padding: 3px 10px; border-radius: 12px;
+  white-space: nowrap; pointer-events: none; z-index: 30;
+  animation: bubblePop 1.2s ease-out forwards;
+}
+@keyframes bubblePop {
+  0% { opacity: 0; transform: translateX(-50%) translateY(6px) scale(0.6); }
+  20% { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+  80% { opacity: 1; }
+  100% { opacity: 0; transform: translateX(-50%) translateY(-10px); }
+}
+
 </style>
 </head>
 <body>
@@ -407,6 +505,10 @@ body { display: flex; flex-direction: column; }
   <div id="toast" class="toast"></div>
   <div id="chooser" class="chooser hidden"></div>
   <div id="settlement" class="settlement hidden"></div>
+
+  <div id="flashOverlay" class="flash-overlay"></div>
+  <div id="banner" class="banner"></div>
+  <div id="confettiLayer" class="confetti-layer"></div>
 
   <script>
 'use strict';
@@ -1263,6 +1365,160 @@ window.RunFirst.cards = { RANK_LABELS, SUITS, SUIT_COLOR, buildDeck, shuffle, de
   <script>
 'use strict';
 
+// ============ 音效模块（Web Audio 合成，零音频文件） ============
+
+(function () {
+  let ctx = null;
+
+  function ensureCtx() {
+    if (!ctx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) ctx = new AC();
+    }
+    if (ctx && ctx.state === 'suspended') ctx.resume();
+    return ctx;
+  }
+
+  function noiseBuffer(duration) {
+    const c = ensureCtx();
+    if (!c) return null;
+    const buf = c.createBuffer(1, Math.max(1, Math.floor(c.sampleRate * duration)), c.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+    return buf;
+  }
+
+  // 短噪声（出牌/抓牌的"啪/唰"）
+  function playNoise(duration, gain, freq, type) {
+    const c = ensureCtx();
+    if (!c) return;
+    const src = c.createBufferSource();
+    src.buffer = noiseBuffer(duration);
+    const f = c.createBiquadFilter();
+    f.type = type || 'lowpass';
+    f.frequency.value = freq || 3000;
+    const g = c.createGain();
+    g.gain.setValueAtTime(gain || 0.25, c.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, c.currentTime + duration);
+    src.connect(f); f.connect(g); g.connect(c.destination);
+    src.start();
+  }
+
+  // 纯音（胜利音阶/炸弹低频）
+  function playTone(freq, duration, gain, type) {
+    const c = ensureCtx();
+    if (!c) return;
+    const o = c.createOscillator();
+    o.type = type || 'sine';
+    o.frequency.setValueAtTime(freq, c.currentTime);
+    const g = c.createGain();
+    g.gain.setValueAtTime(gain || 0.3, c.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, c.currentTime + duration);
+    o.connect(g); g.connect(c.destination);
+    o.start();
+    o.stop(c.currentTime + duration);
+  }
+
+  const SOUNDS = {
+    deal: () => playNoise(0.06, 0.14, 2600),
+    draw: () => playNoise(0.04, 0.11, 3200),
+    play: () => playNoise(0.05, 0.24, 3600),
+    pass: () => playTone(220, 0.06, 0.07),
+    bomb: () => { playTone(85, 0.35, 0.6); playNoise(0.3, 0.3, 420); },
+    hong: () => { playTone(95, 0.4, 0.55); playNoise(0.32, 0.27, 500); },
+    rocket: () => { playTone(65, 0.45, 0.7); playTone(50, 0.5, 0.5); playNoise(0.5, 0.4, 300); },
+    win: () => { [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => playTone(f, 0.25, 0.28), i * 110)); },
+  };
+
+  function play(name) {
+    const s = SOUNDS[name];
+    if (s) s();
+  }
+
+  window.RunFirst = window.RunFirst || {};
+  window.RunFirst.sound = { play, ensureCtx };
+})();
+
+</script>
+  <script>
+'use strict';
+
+// ============ 特效模块（震动/闪光/大字/撒花/分数滚动） ============
+
+(function () {
+  function reflow(el) { void el.offsetWidth; }
+
+  // 整桌震动
+  function shake(el) {
+    if (!el) return;
+    el.classList.remove('shake');
+    reflow(el);
+    el.classList.add('shake');
+    setTimeout(() => el.classList.remove('shake'), 500);
+  }
+
+  // 白光一闪
+  function flash() {
+    const el = document.getElementById('flashOverlay');
+    if (!el) return;
+    el.classList.remove('show');
+    reflow(el);
+    el.classList.add('show');
+    setTimeout(() => el.classList.remove('show'), 500);
+  }
+
+  // 中央大字播报（"炸弹！""王炸！"）
+  function banner(text) {
+    const el = document.getElementById('banner');
+    if (!el) return;
+    el.textContent = text;
+    el.classList.remove('show');
+    reflow(el);
+    el.classList.add('show');
+    setTimeout(() => el.classList.remove('show'), 1300);
+  }
+
+  // 撒花（胜利彩带）
+  function confetti(count) {
+    const layer = document.getElementById('confettiLayer');
+    if (!layer) return;
+    const colors = ['#ffd54a', '#ff6b6b', '#4ecdc4', '#ff9ff3', '#54a0ff', '#ff8c42', '#7bed9f'];
+    for (let i = 0; i < (count || 32); i++) {
+      const p = document.createElement('div');
+      p.className = 'confetti';
+      p.style.left = Math.random() * 100 + '%';
+      p.style.background = colors[i % colors.length];
+      p.style.animationDelay = (Math.random() * 0.9) + 's';
+      p.style.animationDuration = (1.6 + Math.random() * 1.6) + 's';
+      layer.appendChild(p);
+      setTimeout(() => p.remove(), 4000);
+    }
+  }
+
+  // 分数从 0 滚动到目标值
+  function countUp(el, target, duration) {
+    if (!el) return;
+    const dur = duration || 900;
+    const abs = Math.abs(target);
+    const sign = target >= 0 ? '+' : '-';
+    const start = performance.now();
+    function step(now) {
+      const t = Math.min(1, (now - start) / dur);
+      const eased = 1 - Math.pow(1 - t, 3);
+      el.textContent = sign + Math.round(abs * eased);
+      if (t < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  }
+
+  window.RunFirst = window.RunFirst || {};
+  window.RunFirst.effects = { shake, flash, banner, confetti, countUp };
+})();
+
+</script>
+  <script>
+'use strict';
+
 // ============ 界面渲染与交互（我的视角） ============
 
 (function () {
@@ -1272,6 +1528,7 @@ window.RunFirst.cards = { RANK_LABELS, SUITS, SUIT_COLOR, buildDeck, shuffle, de
   const state = game.state;
 
   const deckCountEl = document.getElementById('deckCount');
+  const gameTableEl = document.getElementById('gameTable');
   const roundInfoEl = document.getElementById('roundInfo');
   const leftColEl = document.getElementById('leftCol');
   const rightColEl = document.getElementById('rightCol');
@@ -1338,6 +1595,59 @@ window.RunFirst.cards = { RANK_LABELS, SUITS, SUIT_COLOR, buildDeck, shuffle, de
     return el;
   }
 
+  // ===== 音效/特效/头像辅助 =====
+  const AI_EMOJIS = ['🐶', '🐱', '🦊', '🐼', '🐸', '🐵'];
+  function avatarFor(p) {
+    if (!p.isAI) return '👤';
+    return AI_EMOJIS[(p.index - 1 + AI_EMOJIS.length) % AI_EMOJIS.length] || '🤖';
+  }
+
+  // 一次性动画标记
+  let dealAnim = false;
+  let playAnim = false;
+  let winEffectDone = false;
+  let settlementDone = false;
+
+  function soundForPlay(play) {
+    const s = window.RunFirst.sound;
+    if (play.type === 'rocket') s.play('rocket');
+    else if (play.type === 'hong') s.play('hong');
+    else if (play.type === 'bomb') s.play('bomb');
+    else s.play('play');
+  }
+
+  function effectForPlay(play) {
+    const fx = window.RunFirst.effects;
+    if (play.type === 'rocket') { fx.shake(gameTableEl); fx.flash(); fx.banner('王 炸 ！'); }
+    else if (play.type === 'hong') { fx.shake(gameTableEl); fx.flash(); fx.banner('轰 ！'); }
+    else if (play.type === 'bomb') { fx.shake(gameTableEl); fx.flash(); fx.banner('炸 弹 ！'); }
+  }
+
+  function feedbackPlay() {
+    const play = state.lastPlay;
+    if (play) { soundForPlay(play); effectForPlay(play); }
+    playAnim = true;
+    if (game.isOver() && !winEffectDone) {
+      winEffectDone = true;
+      window.RunFirst.sound.play('win');
+      window.RunFirst.effects.confetti(40);
+    }
+  }
+
+  function feedbackPass() {
+    window.RunFirst.sound.play('pass');
+  }
+
+  function showBubble(playerIndex, text) {
+    const row = document.querySelector('.opp-row[data-index="' + playerIndex + '"]');
+    if (!row) return;
+    const b = document.createElement('div');
+    b.className = 'bubble';
+    b.textContent = text;
+    row.appendChild(b);
+    setTimeout(() => b.remove(), 1300);
+  }
+
   function toggleSelect(id) {
     if (selectedIds.has(id)) selectedIds.delete(id);
     else selectedIds.add(id);
@@ -1367,6 +1677,8 @@ window.RunFirst.cards = { RANK_LABELS, SUITS, SUIT_COLOR, buildDeck, shuffle, de
     if (!p || !p.isAI) return;
     aiTimer = setTimeout(() => {
       aiTimer = null;
+      const aiIndex = state.currentIndex;
+      let acted = null;
       try {
         const decision = window.RunFirst.ai.decide(
           p.cards, state.lastPlay, buildContext(state.currentIndex), p.aiStyle
@@ -1377,12 +1689,16 @@ window.RunFirst.cards = { RANK_LABELS, SUITS, SUIT_COLOR, buildDeck, shuffle, de
           if (res.needChoice) res = game.play(state.currentIndex, decision.cards, 0);
           ok = res.ok;
         }
-        if (!ok) game.pass(state.currentIndex);
+        if (ok) { acted = 'play'; }
+        else { game.pass(state.currentIndex); acted = 'pass'; }
       } catch (e) {
         console.error('AI 出牌异常', e);
-        try { game.pass(state.currentIndex); } catch (e2) { /* ignore */ }
+        try { game.pass(state.currentIndex); acted = 'pass'; } catch (e2) { /* ignore */ }
       }
+      if (acted === 'play') feedbackPlay();
+      else if (acted === 'pass') feedbackPass();
       render();
+      if (acted === 'pass') showBubble(aiIndex, '要不起');
     }, AI_DELAY);
   }
 
@@ -1450,12 +1766,14 @@ window.RunFirst.cards = { RANK_LABELS, SUITS, SUIT_COLOR, buildDeck, shuffle, de
     const p = state.players[state.currentIndex];
     if (!p) return;
     const decision = window.RunFirst.ai.decide(p.cards, state.lastPlay, buildContext(state.currentIndex), 'balanced');
+    let ok = false;
     if (decision) {
       let res = game.play(state.currentIndex, decision.cards);
       if (res.needChoice) res = game.play(state.currentIndex, decision.cards, 0);
-    } else {
-      game.pass(state.currentIndex);
+      ok = res.ok;
     }
+    if (!ok) game.pass(state.currentIndex);
+    if (ok) feedbackPlay(); else feedbackPass();
     selectedIds.clear();
     render();
   }
@@ -1472,6 +1790,8 @@ window.RunFirst.cards = { RANK_LABELS, SUITS, SUIT_COLOR, buildDeck, shuffle, de
     renderSettlement();
     handleCountdown();
     maybeScheduleAI();
+    dealAnim = false;
+    playAnim = false;
   }
 
   function renderDeck() {
@@ -1488,10 +1808,16 @@ window.RunFirst.cards = { RANK_LABELS, SUITS, SUIT_COLOR, buildDeck, shuffle, de
   function playerBoxEl(p, isLeft) {
     const row = document.createElement('div');
     row.className = 'opp-row';
+    row.dataset.index = p.index;
     if (!game.isOver() && p.index === state.currentIndex) row.classList.add('current');
 
     const seat = document.createElement('div');
     seat.className = 'opp-seat';
+
+    const avatar = document.createElement('div');
+    avatar.className = 'avatar';
+    avatar.textContent = avatarFor(p);
+    seat.appendChild(avatar);
 
     const name = document.createElement('div');
     name.className = 'name';
@@ -1564,7 +1890,14 @@ window.RunFirst.cards = { RANK_LABELS, SUITS, SUIT_COLOR, buildDeck, shuffle, de
     if (state.lastPlayIndex >= 0 && state.lastPlay && state.lastPlayCards.length) {
       const lp = state.players[state.lastPlayIndex];
       discardLabelEl.textContent = lp.name + ' 出（' + rules.playLabel(state.lastPlay) + '）';
-      state.lastPlayCards.forEach((c) => discardCardsEl.appendChild(cardEl(c, false, false)));
+      state.lastPlayCards.forEach((c, i) => {
+        const el = cardEl(c, false, false);
+        if (playAnim) {
+          el.classList.add('play-in');
+          el.style.animationDelay = (i * 45) + 'ms';
+        }
+        discardCardsEl.appendChild(el);
+      });
     } else if (state.players.length) {
       const cur = state.players[state.currentIndex];
       discardLabelEl.textContent = (cur ? cur.name : '') + ' 请出牌';
@@ -1611,6 +1944,10 @@ window.RunFirst.cards = { RANK_LABELS, SUITS, SUIT_COLOR, buildDeck, shuffle, de
     me.cards.forEach((c, i) => {
       const el = cardEl(c, selectable, selectedIds.has(c.id));
       if (i > 0) el.style.marginLeft = margin + 'px';
+      if (dealAnim) {
+        el.classList.add('deal-in');
+        el.style.animationDelay = (i * 35) + 'ms';
+      }
       myHandEl.appendChild(el);
     });
   }
@@ -1648,6 +1985,7 @@ window.RunFirst.cards = { RANK_LABELS, SUITS, SUIT_COLOR, buildDeck, shuffle, de
   function renderSettlement() {
     if (!game.isOver() || !state.results) {
       settlementEl.classList.add('hidden');
+      settlementDone = false;
       return;
     }
     const r = state.results;
@@ -1666,7 +2004,7 @@ window.RunFirst.cards = { RANK_LABELS, SUITS, SUIT_COLOR, buildDeck, shuffle, de
       }
       html += '<li' + (isWinner ? ' class="winner"' : '') + '>';
       html += '<span class="pname">' + p.name + (isWinner ? ' <span class="badge win">胜</span>' : '') + '</span>';
-      html += '<span class="delta ' + (delta >= 0 ? 'up' : 'down') + '">' + (delta >= 0 ? '+' : '') + delta + '</span>';
+      html += '<span class="delta ' + (delta >= 0 ? 'up' : 'down') + '" data-target="' + delta + '">0</span>';
       html += '</li>';
     });
     html += '</ul>';
@@ -1675,6 +2013,13 @@ window.RunFirst.cards = { RANK_LABELS, SUITS, SUIT_COLOR, buildDeck, shuffle, de
     settlementEl.innerHTML = html;
     settlementEl.classList.remove('hidden');
     document.getElementById('againBtn').addEventListener('click', onRestart);
+
+    if (!settlementDone) {
+      settlementDone = true;
+      settlementEl.querySelectorAll('.delta').forEach((el) => {
+        window.RunFirst.effects.countUp(el, parseInt(el.dataset.target, 10), 900);
+      });
+    }
   }
 
   function showChooser(choices, cards) {
@@ -1705,6 +2050,7 @@ window.RunFirst.cards = { RANK_LABELS, SUITS, SUIT_COLOR, buildDeck, shuffle, de
     const res = game.play(state.currentIndex, selCards);
     if (res.ok) {
       selectedIds.clear();
+      feedbackPlay();
       render();
     } else if (res.needChoice) {
       showChooser(res.choices, selCards);
@@ -1720,6 +2066,7 @@ window.RunFirst.cards = { RANK_LABELS, SUITS, SUIT_COLOR, buildDeck, shuffle, de
       return;
     }
     selectedIds.clear();
+    feedbackPass();
     render();
   }
 
@@ -1750,6 +2097,11 @@ window.RunFirst.cards = { RANK_LABELS, SUITS, SUIT_COLOR, buildDeck, shuffle, de
     selectedIds.clear();
     viewingIndex = 0;
     lastTurnKey = '';
+    dealAnim = true;
+    winEffectDone = false;
+    settlementDone = false;
+    window.RunFirst.sound.ensureCtx();
+    window.RunFirst.sound.play('deal');
     render();
   }
 
@@ -1758,6 +2110,11 @@ window.RunFirst.cards = { RANK_LABELS, SUITS, SUIT_COLOR, buildDeck, shuffle, de
     selectedIds.clear();
     viewingIndex = 0;
     lastTurnKey = '';
+    dealAnim = true;
+    winEffectDone = false;
+    settlementDone = false;
+    window.RunFirst.sound.ensureCtx();
+    window.RunFirst.sound.play('deal');
     render();
   }
 
